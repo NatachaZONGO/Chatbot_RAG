@@ -19,7 +19,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS - Style ChatGPT-like (contrastes OK)
 st.markdown("""
 <style>
 .stApp { background-color: #F7F7F8; }
