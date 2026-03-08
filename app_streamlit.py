@@ -80,6 +80,65 @@ footer {visibility: hidden;}
 
 /* Titres */
 h1, h2, h3 { color: #111827 !important; }
+
+/* Carte de reformulation */
+.reformulation-card {
+    background: linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 100%);
+    border: 1.5px solid #6366F1;
+    border-radius: 14px;
+    padding: 18px 22px;
+    margin-top: 18px;
+    margin-bottom: 6px;
+}
+.reformulation-card .ref-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #4F46E5;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 8px;
+}
+.reformulation-card .ref-text {
+    font-size: 1.02rem;
+    color: #1E1B4B;
+    font-style: italic;
+    line-height: 1.6;
+}
+
+/* Badge verdict */
+.verdict-badge-pertinent {
+    display: inline-block;
+    background: #D1FAE5;
+    color: #065F46;
+    border: 1.5px solid #6EE7B7;
+    border-radius: 20px;
+    padding: 4px 16px;
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+}
+.verdict-badge-ameliorer {
+    display: inline-block;
+    background: #FEF3C7;
+    color: #92400E;
+    border: 1.5px solid #FCD34D;
+    border-radius: 20px;
+    padding: 4px 16px;
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+}
+.verdict-badge-nonpertinent {
+    display: inline-block;
+    background: #FEE2E2;
+    color: #991B1B;
+    border: 1.5px solid #FCA5A5;
+    border-radius: 20px;
+    padding: 4px 16px;
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,7 +152,7 @@ DB_CONFIG = {
 }
 
 CONVERSATIONS_FILE = "conversations_history.json"
-OLLAMA_MODEL = "llama3.2:1b"  # si tu as mieux (3b/8b), remplace ici
+OLLAMA_MODEL = "llama3.2:1b"
 
 # ===== OUTILS DB =====
 def conn_string() -> str:
@@ -102,7 +161,7 @@ def conn_string() -> str:
         f"host={DB_CONFIG['host']} port={DB_CONFIG['port']}"
     )
 
-# ===== GESTION DE LA PERSISTANCE (conversations UI) =====
+# ===== GESTION DE LA PERSISTANCE =====
 def charger_conversations():
     if os.path.exists(CONVERSATIONS_FILE):
         try:
@@ -119,17 +178,16 @@ def sauvegarder_conversations(conversations):
     except Exception as e:
         st.error(f"Erreur de sauvegarde : {e}")
 
-# ===== QUERY PARAMS (liste cliquable style ChatGPT) =====
+# ===== QUERY PARAMS =====
 def set_query_params(params: dict):
-    """Compat Streamlit: nouveaux/anciens APIs"""
     try:
-        st.query_params.update(params)  # Streamlit récent
+        st.query_params.update(params)
     except Exception:
         st.experimental_set_query_params(**params)
 
 def get_query_param(key: str) -> Optional[str]:
     try:
-        return st.query_params.get(key)  # Streamlit récent
+        return st.query_params.get(key)
     except Exception:
         qp = st.experimental_get_query_params()
         v = qp.get(key, [None])
@@ -143,7 +201,7 @@ def load_model():
 with st.spinner("Chargement..."):
     embedding_model = load_model()
 
-# ===== FONCTIONS (RAG + VALIDATION) =====
+# ===== FONCTIONS UTILITAIRES =====
 def generer_titre_conversation(premier_message: str) -> str:
     mots = premier_message.split()[:4]
     return " ".join(mots) + ("..." if len(premier_message.split()) > 4 else "")
@@ -155,9 +213,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 def retrieve_chunks(requete: str, top_k: int = 6) -> List[Dict]:
-    """Récupère les meilleurs chunks (RAG) depuis PostgreSQL et calcule la similarité en Python."""
     q_emb = np.array(embedding_model.encode(requete), dtype=np.float32)
-
     try:
         with psycopg.connect(conn_string()) as conn:
             with conn.cursor() as cur:
@@ -185,53 +241,118 @@ def retrieve_chunks(requete: str, top_k: int = 6) -> List[Dict]:
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]
 
+
 def build_validation_prompt(theme: str, retrieved: List[Dict]) -> str:
     context = "\n\n".join([
-        f"[Source {i+1}] Document: {r['doc_title']} | Similarité: {r['score']:.2f}\nExtrait: {r['content'][:1200]}"
+        f"[Source {i+1}] Titre: {r['doc_title']} | Similarité: {r['score']:.2f}\nExtrait: {r['content'][:1200]}"
         for i, r in enumerate(retrieved)
     ])
 
+    avg_score = sum(r["score"] for r in retrieved) / len(retrieved) if retrieved else 0
+    max_score = max(r["score"] for r in retrieved) if retrieved else 0
+    scores_str = " | ".join([
+        f"Source {i+1} ({r['doc_title'][:25]}): {r['score']:.2f}"
+        for i, r in enumerate(retrieved)
+    ])
+
+    if max_score >= 0.85:
+        interpretation = (
+            f"ATTENTION — La source la plus proche a un score de {max_score:.2f} (très élevé). "
+            "Cela indique qu'un travail quasi-identique existe déjà dans la base. "
+            "Le thème manque probablement d'originalité."
+        )
+    elif avg_score >= 0.50:
+        interpretation = (
+            f"Score moyen de {avg_score:.2f} — Des travaux proches existent dans la base. "
+            "Le domaine est documenté. Vérifie si le thème apporte une contribution nouvelle "
+            "par rapport aux sources citées."
+        )
+    else:
+        interpretation = (
+            f"Score moyen faible de {avg_score:.2f} — La base documentaire ne couvre pas bien ce domaine. "
+            "Tu dois évaluer la qualité académique du thème de façon autonome et signaler "
+            "clairement l'absence de travaux similaires dans la base."
+        )
+
     return f"""
-Tu es un assistant universitaire qui analyse et valide la pertinence d'un thème de projet (Machine Learning / Data Mining).
-Tu dois être strict, clair, et justifier tes conclusions uniquement à partir des SOURCES fournies.
+Tu es un assistant académique chargé d'évaluer la pertinence d'un thème de projet soumis par un étudiant.
+Le thème peut appartenir à N'IMPORTE QUEL domaine académique : informatique, médecine, droit, économie, sciences sociales, agronomie, éducation, etc.
 
-THEME A ANALYSER:
+═══════════════════════════════════════════
+THÈME SOUMIS PAR L'ÉTUDIANT :
 {theme}
+═══════════════════════════════════════════
 
-SOURCES (extraits RAG):
+BASE DOCUMENTAIRE — travaux déjà référencés dans le système :
 {context}
 
-Tâche:
-1) Donne un VERDICT: "Pertinent" OU "À améliorer" OU "Non pertinent"
-2) Donne des SCORES sur 5 pour:
-   - clarte_precision
-   - alignement_ml_dm
-   - faisabilite
-   - originalite
-   - perimetre
-3) Justifie chaque score (et le verdict) en citant [Source 1], [Source 2], etc.
-4) Propose une REFORMULATION améliorée (1 phrase).
-5) Propose 3 à 6 RECOMMANDATIONS concrètes (objectifs, données possibles, méthode ML, métriques d'évaluation).
-6) Si le thème est trop vague, ajoute une section "Questions" avec 3 à 5 questions à poser à l'étudiant.
+Scores de similarité individuels : {scores_str}
+Score moyen : {avg_score:.2f} | Score maximum : {max_score:.2f}
 
-Format de sortie OBLIGATOIRE (Markdown):
+Interprétation des scores : {interpretation}
+
+═══════════════════════════════════════════
+TA MISSION : évaluer ce thème selon TROIS critères puis rendre un verdict clair et justifié.
+═══════════════════════════════════════════
+
+CRITÈRE 1 — QUALITÉ ACADÉMIQUE DU THÈME (juge le thème en lui-même)
+• Le thème est-il clairement formulé ? L'objectif est-il compréhensible ?
+• Est-il réalisable pour un étudiant (ni trop vague, ni irréaliste) ?
+• A-t-il un périmètre défini (terrain, population cible, outil, période) ?
+• Apporte-t-il une valeur scientifique, sociale ou pratique ?
+
+CRITÈRE 2 — COUVERTURE PAR LA BASE DOCUMENTAIRE
+• La base contient-elle des travaux dans ce domaine ? Cite les sources pertinentes.
+• Si le domaine n'est PAS couvert par la base, dis-le clairement et explicitement :
+  "La base documentaire ne couvre pas ce domaine. L'évaluation repose uniquement sur la qualité académique du thème."
+• Ne prétends jamais que les sources sont pertinentes si elles traitent d'un autre domaine.
+
+CRITÈRE 3 — ORIGINALITÉ PAR RAPPORT À L'EXISTANT
+• Le thème ressemble-t-il à un travail déjà réalisé dans la base (score élevé) ?
+• Si oui, en quoi se distingue-t-il ? Ou est-il trop identique ?
+• Un thème original sur un terrain nouveau ou avec une approche nouvelle a plus de valeur.
+
+═══════════════════════════════════════════
+RÈGLES DE VERDICT (applique-les rigoureusement) :
+• "Pertinent"      → Thème clair, faisable, bien délimité ET suffisamment original par rapport à l'existant.
+• "À améliorer"    → Thème prometteur mais trop vague, mal délimité, ou trop proche d'un existant sans apport nouveau.
+• "Non pertinent"  → Thème incompréhensible, irréalisable, ou quasi-identique à un travail déjà fait (doublon).
+═══════════════════════════════════════════
+
+FORMAT DE SORTIE OBLIGATOIRE — respecte exactement ces titres Markdown :
+
 ### Verdict
-...
+[Écris exactement l'un de ces mots : Pertinent / À améliorer / Non pertinent]
+Puis explique en 3 à 4 phrases claires POURQUOI ce verdict, en te basant sur les trois critères.
+Cite les sources si elles sont utiles ([Source 1], [Source 2]...).
+Si les sources ne couvrent pas le domaine du thème, dis-le explicitement ici.
+
 ### Scores (/5)
-- clarte_precision: x/5
-- alignement_ml_dm: x/5
-- faisabilite: x/5
-- originalite: x/5
-- perimetre: x/5
+- clarte_precision: x/5 — [justification courte]
+- alignement_domaine: x/5 — [le thème s'inscrit-il dans un domaine académique reconnu ?]
+- faisabilite: x/5 — [justification courte]
+- originalite: x/5 — [par rapport aux sources existantes]
+- perimetre: x/5 — [le thème est-il bien délimité ?]
+
 ### Justification
-...
+Développe ton analyse complète. Pour chaque critère (qualité académique, couverture documentaire, originalité), donne des arguments précis. Cite les sources si disponibles et pertinentes.
+
 ### Reformulation
-...
+[Propose 1 à 2 phrases CONCRÈTES qui améliorent la formulation du thème : plus précis, mieux délimité, avec un terrain ou une approche clairement définis. Cette reformulation doit être directement utilisable par l'étudiant comme nouveau thème.]
+
 ### Recommandations
-- ...
+- [Recommandation 1 : préciser le terrain / la population / la zone géographique]
+- [Recommandation 2 : définir la méthode ou l'approche utilisée]
+- [Recommandation 3 : identifier les données ou ressources nécessaires]
+- [Recommandation 4 : définir des indicateurs ou résultats attendus mesurables]
+- [Recommandation 5 si pertinent]
+
 ### Questions
-- ...
+- [Question 1 à poser à l'étudiant pour clarifier le thème]
+- [Question 2]
+- [Question 3]
 """.strip()
+
 
 def generer_validation_avec_ollama(theme: str, retrieved: List[Dict]) -> str:
     prompt = build_validation_prompt(theme, retrieved)
@@ -240,6 +361,7 @@ def generer_validation_avec_ollama(theme: str, retrieved: List[Dict]) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     return response["message"]["content"]
+
 
 def _extract_score(text: str, key: str) -> Optional[int]:
     pattern = rf"{re.escape(key)}\s*:\s*(\d)\s*/\s*5"
@@ -251,6 +373,7 @@ def _extract_score(text: str, key: str) -> Optional[int]:
         return max(0, min(5, v))
     except:
         return None
+
 
 def parse_validation(answer_md: str) -> Dict:
     verdict = "À améliorer"
@@ -268,11 +391,11 @@ def parse_validation(answer_md: str) -> Dict:
             verdict = v[:40]
 
     scores = {
-        "clarte_precision": _extract_score(answer_md, "clarte_precision") or 0,
-        "alignement_ml_dm": _extract_score(answer_md, "alignement_ml_dm") or 0,
-        "faisabilite": _extract_score(answer_md, "faisabilite") or 0,
-        "originalite": _extract_score(answer_md, "originalite") or 0,
-        "perimetre": _extract_score(answer_md, "perimetre") or 0,
+        "clarte_precision":   _extract_score(answer_md, "clarte_precision") or 0,
+        "alignement_domaine": _extract_score(answer_md, "alignement_domaine") or 0,
+        "faisabilite":        _extract_score(answer_md, "faisabilite") or 0,
+        "originalite":        _extract_score(answer_md, "originalite") or 0,
+        "perimetre":          _extract_score(answer_md, "perimetre") or 0,
     }
 
     def extract_section(title: str) -> str:
@@ -280,17 +403,79 @@ def parse_validation(answer_md: str) -> Dict:
                        flags=re.IGNORECASE | re.DOTALL)
         return mm.group(1).strip() if mm else ""
 
-    justification = extract_section("Justification")
-    reformulation = extract_section("Reformulation")
+    justification   = extract_section("Justification")
+    reformulation   = extract_section("Reformulation")
     recommandations = extract_section("Recommandations")
 
+    # Nettoyer la reformulation : enlever les marqueurs résiduels, garder le texte pur
+    if reformulation:
+        # Supprimer les crochets si le LLM a laissé le template
+        reformulation = re.sub(r"^\[|\]$", "", reformulation.strip())
+        reformulation = reformulation.strip()
+
     return {
-        "verdict": verdict,
-        "scores": scores,
-        "justification": justification,
-        "reformulation": reformulation,
+        "verdict":         verdict,
+        "scores":          scores,
+        "justification":   justification,
+        "reformulation":   reformulation,
         "recommandations": recommandations,
     }
+
+
+def afficher_carte_reformulation(reformulation: str, verdict: str):
+    """
+    Affiche la reformulation dans une carte visuelle mise en avant,
+    avec un bouton pour réutiliser le thème amélioré comme nouvelle soumission.
+    """
+    if not reformulation or len(reformulation) < 10:
+        return
+
+    # Choisir l'emoji selon le verdict
+    if verdict == "Pertinent":
+        emoji_verdict = "✅"
+        conseil = "Ton thème est pertinent. Voici une version affinée si tu souhaites le préciser davantage :"
+    elif verdict == "Non pertinent":
+        emoji_verdict = "❌"
+        conseil = "Ton thème n'est pas pertinent dans sa forme actuelle. Voici une reformulation suggérée pour le rendre académiquement valide :"
+    else:
+        emoji_verdict = "🔄"
+        conseil = "Ton thème mérite d'être amélioré. Voici une version reformulée et mieux délimitée :"
+
+    st.markdown(f"""
+    <div class="reformulation-card">
+        <div class="ref-label">💡 Suggestion de reformulation {emoji_verdict}</div>
+        <div style="font-size:0.82rem; color:#4338CA; margin-bottom:10px;">{conseil}</div>
+        <div class="ref-text">« {reformulation} »</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Bouton pour soumettre la reformulation comme nouveau thème
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.caption("👆 Utilise ce thème amélioré pour une nouvelle analyse.")
+    with col2:
+        if st.button("🔁 Analyser ce thème amélioré", key=f"resubmit_{hash(reformulation)}"):
+            st.session_state.resubmit_theme = reformulation
+            st.rerun()
+
+
+def afficher_badge_verdict(verdict: str):
+    """Affiche un badge coloré selon le verdict."""
+    if verdict == "Pertinent":
+        css_class = "verdict-badge-pertinent"
+        icon = "✅"
+    elif verdict == "Non pertinent":
+        css_class = "verdict-badge-nonpertinent"
+        icon = "❌"
+    else:
+        css_class = "verdict-badge-ameliorer"
+        icon = "⚠️"
+
+    st.markdown(
+        f'<span class="{css_class}">{icon} {verdict}</span>',
+        unsafe_allow_html=True
+    )
+
 
 def save_analysis(
     session_id: str,
@@ -332,16 +517,14 @@ def save_analysis(
                 )
         conn.commit()
 
+
 # ===== INITIALISATION =====
 if "conversations" not in st.session_state:
     st.session_state.conversations = charger_conversations()
-
 if "current_id" not in st.session_state:
     st.session_state.current_id = None
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
@@ -349,7 +532,6 @@ if "session_id" not in st.session_state:
 with st.sidebar:
     st.markdown("### 🧠 CheiTacha AI")
 
-    # Nouvelle conversation
     if st.button("✚ Nouvelle conversation", use_container_width=True):
         if st.session_state.messages:
             premier_msg = next((m["content"] for m in st.session_state.messages if m["role"] == "user"), "Conversation")
@@ -381,11 +563,8 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-
-    # ===== LISTE CONVERSATIONS (style ChatGPT) =====
     st.markdown("### Conversations")
 
-    # clic via URL (?conv=ID)
     clicked_id = get_query_param("conv")
     if clicked_id is not None:
         try:
@@ -404,13 +583,12 @@ with st.sidebar:
         for conv in st.session_state.conversations[:30]:
             is_active = conv["id"] == st.session_state.current_id
             cls = "conv-item conv-active" if is_active else "conv-item"
-
             title = conv["titre"]
             if len(title) > 28:
                 title = title[:28] + "..."
-
+            conv_id = conv["id"]
             st.markdown(
-                f"<a class='{cls}' href='?conv={conv['id']}'>{title}</a>",
+                f"<a class='{cls}' href='?conv={conv_id}'>{title}</a>",
                 unsafe_allow_html=True
             )
     else:
@@ -427,6 +605,7 @@ with st.sidebar:
 
     st.caption(f"{len(st.session_state.conversations)} conversation(s)")
 
+
 # ===== INTERFACE PRINCIPALE =====
 st.markdown("""
 <div style="text-align:center; margin-bottom:20px;">
@@ -435,20 +614,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("## 🧠 CheiTacha Validator – RAG System AI")
-st.markdown("*Assistant intelligent de validation de thèmes (Verdict • Scores • Justification • Reformulation)*")
+st.markdown("*Assistant intelligent de validation de thèmes académiques (Verdict • Scores • Justification • Reformulation)*")
 st.markdown("---")
 
-# Message d'accueil + exemples
 if not st.session_state.messages:
-    st.info("👋 Décris ton thème de projet. Le système va retrouver des sources (RAG) et produire une fiche de validation.")
+    st.info("👋 Décris ton thème de projet. Le système analysera sa qualité académique, vérifiera s'il a déjà été réalisé, et produira une fiche de validation complète.")
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button("IA conversationnelle", use_container_width=True):
-            st.session_state.example = "Conception d’un chatbot RAG pour valider des thèmes de projets universitaires."
+            st.session_state.example = "Conception d'un chatbot RAG pour valider des thèmes de projets universitaires."
             st.rerun()
         if st.button("Projet cybersécurité", use_container_width=True):
-            st.session_state.example = "Détection d’attaques web et URLs malveillantes par Machine Learning avec analyse de caractéristiques."
+            st.session_state.example = "Détection d'attaques web et URLs malveillantes par Machine Learning avec analyse de caractéristiques."
             st.rerun()
     with col2:
         if st.button("Projet finance", use_container_width=True):
@@ -458,42 +636,68 @@ if not st.session_state.messages:
             st.session_state.example = "Analyse de sentiments sur les réseaux sociaux pour améliorer la prévision de séries temporelles (prix agricoles)."
             st.rerun()
 
-# Afficher messages
+# Afficher les messages existants
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Ré-afficher la carte de reformulation pour les messages déjà enregistrés
+        if message["role"] == "assistant" and "reformulation" in message:
+            afficher_carte_reformulation(message["reformulation"], message.get("verdict", "À améliorer"))
 
 # Input chat
-user_input = st.chat_input("Décris ton thème (1–3 phrases)...")
+user_input = st.chat_input("Décris ton thème de projet (1–3 phrases, tout domaine accepté)...")
 
+# Gérer les exemples rapides
 if "example" in st.session_state:
     user_input = st.session_state.example
     del st.session_state.example
 
+# Gérer la re-soumission depuis le bouton "Analyser ce thème amélioré"
+if "resubmit_theme" in st.session_state:
+    user_input = st.session_state.resubmit_theme
+    del st.session_state.resubmit_theme
+
 if user_input:
-    # Message utilisateur
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Réponse assistant (RAG + validation)
     with st.chat_message("assistant"):
-        with st.spinner("Analyse & validation (RAG)..."):
+        with st.spinner("Analyse & validation en cours..."):
             retrieved = retrieve_chunks(user_input, top_k=6)
 
             if not retrieved:
                 st.error("Aucun chunk trouvé. Vérifie que la table chunks contient des données.")
             else:
+                # Affichage des sources avec badge d'interprétation
                 st.markdown("**Sources retrouvées (RAG)**")
                 for i, r in enumerate(retrieved, 1):
-                    with st.expander(f"{i}. {r['doc_title']} — score {r['score']:.2f}"):
+                    score = r["score"]
+                    if score >= 0.85:
+                        badge = "🔴 Très proche — risque de doublon"
+                    elif score >= 0.60:
+                        badge = "🟡 Partiellement similaire"
+                    else:
+                        badge = "🟢 Domaine différent ou peu couvert"
+                    with st.expander(f"{i}. {r['doc_title']} — score {score:.2f}  {badge}"):
                         st.write(r["content"][:2500])
 
+                # Génération de la réponse
                 answer = generer_validation_avec_ollama(user_input, retrieved)
+
+                # Parse du résultat
+                parsed = parse_validation(answer)
+
+                # ── Affichage du badge verdict en haut ──
+                afficher_badge_verdict(parsed["verdict"])
+
+                # ── Affichage de la réponse complète (markdown) ──
                 st.markdown(answer)
 
-                # Parse + save in DB
-                parsed = parse_validation(answer)
+                # ── Carte de reformulation (affichage mis en avant APRÈS l'analyse) ──
+                afficher_carte_reformulation(parsed["reformulation"], parsed["verdict"])
+
+                # Sauvegarde en DB
                 try:
                     save_analysis(
                         session_id=st.session_state.session_id,
@@ -508,10 +712,15 @@ if user_input:
                 except Exception as e:
                     st.warning(f"⚠️ Analyse non sauvegardée (DB) : {e}")
 
-                # UI history
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                # Sauvegarde dans l'historique UI (avec reformulation et verdict pour ré-affichage)
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": answer,
+                    "reformulation": parsed["reformulation"],
+                    "verdict": parsed["verdict"],
+                }
+                st.session_state.messages.append(assistant_msg)
 
-                # Sauvegarder conversation UI
                 if st.session_state.current_id is not None:
                     for conv in st.session_state.conversations:
                         if conv["id"] == st.session_state.current_id:
